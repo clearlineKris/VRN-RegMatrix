@@ -10,16 +10,17 @@ These are not historical notes. They are active constraints that shape every kno
 
 | Document | ID | Status |
 |----------|----|--------|
-| BikeMN Knowledge Ethos | VRI-STR-009 | Active |
-| Repository Information Architecture | VRI-STR-008 | Active |
-| The Content Flywheel | VRI-STR-007 | Active |
 | Atomic Knowledge Architecture | VRI-STR-006 | Active |
+| The Content Flywheel | VRI-STR-007 | Active |
+| Repository Information Architecture | VRI-STR-008 | Active |
+| BikeMN Knowledge Ethos | VRI-STR-009 | Active |
+| Cross-Repo Linking and Sync Rules | VRI-STR-010 | Active |
 
 ## Relationships
 
-- Upstream: Veridion organizational doctrine and product strategy
-- Downstream: All other directories in the RegMatrix (01–09 + resources)
-- Related: Future contribution guidelines, review checklists, AI agent system prompts
+- Upstream: Veridion organizational doctrine and product strategy; broader TVK Horizon personal OS / knowledge system
+- Downstream: All other directories in the RegMatrix (01–09 + resources) and the public product site (CLRegMatrix)
+- Related: Contribution guidelines, review checklists, AI agent system prompts, projection workflow
 
 ## Contribution Expectations
 
@@ -27,6 +28,7 @@ These are not historical notes. They are active constraints that shape every kno
 - Propose changes via explicit revision (new version or amendment note).
 - Do not create knowledge nodes that violate linking rules, metadata requirements, or the no-duplication rule.
 - When a research session produces assets, map them against the Content Flywheel minimum outputs.
+- Public projections must follow VRI-STR-010.
 
 ## Navigation
 

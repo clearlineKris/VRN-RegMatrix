@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (list candidates only, do not open PR)"
+        description: "Dry run (list candidates + generate files only; do not push or open PR)"
         required: false
         default: "true"
         type: boolean
       target_branch:
-        description: "Branch to open PR against in CLRegMatrix"
+        description: "Base branch in CLRegMatrix to open the PR against"
         required: false
         default: "main"
-  # Optional: uncomment to run on pushes that touch knowledge content
+  # Uncomment to auto-run when knowledge content changes:
   # push:
   #   branches: [main]
   #   paths:
@@ -23,7 +23,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write   # only needed if acting on this repo; cross-repo uses token
 
 jobs:
   project:
@@ -39,107 +38,234 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Find public_status: ready nodes
+      - name: Find ready nodes and generate projections
         id: find
         run: |
-          python3 << 'EOF'
-          import os, re, json
+          python3 << 'PY'
+          import os, re, json, datetime
           from pathlib import Path
 
+          def extract_section(body: str, heading: str) -> str:
+              pattern = rf"##\s+{re.escape(heading)}\s*\n(.*?)(?=\n##\s+|\Z)"
+              m = re.search(pattern, body, re.S | re.I)
+              if not m:
+                  return ""
+              text = m.group(1).strip()
+              lines = [ln for ln in text.splitlines() if ln.strip()]
+              return "\n".join(lines[:12]).strip()
+
           candidates = []
+          projections_dir = Path("generated_projections")
+          projections_dir.mkdir(exist_ok=True)
+
           root = Path(".")
           for md in root.rglob("*.md"):
-              if md.parts[0] in {".github", "resources"} and md.name != "node_template.md":
+              if md.parts[0] in {".github", "resources", "generated_projections"}:
                   continue
               text = md.read_text(encoding="utf-8", errors="ignore")
-              # simple front-matter parse
-              if text.startswith("---"):
-                  parts = text.split("---", 2)
-                  if len(parts) >= 3:
-                      fm = parts[1]
-                      status_match = re.search(r"public_status:\s*[\"']?(ready|published)[\"']?", fm, re.I)
-                      if status_match:
-                          title_match = re.search(r"title:\s*[\"']?(.+?)[\"']?\s*$", fm, re.M)
-                          id_match = re.search(r"^id:\s*[\"']?(.+?)[\"']?\s*$", fm, re.M)
-                          candidates.append({
-                              "path": str(md).replace("\\", "/"),
-                              "title": title_match.group(1).strip() if title_match else md.stem,
-                              "id": id_match.group(1).strip() if id_match else "",
-                              "status": status_match.group(1).lower()
-                          })
+              if not text.startswith("---"):
+                  continue
+              parts = text.split("---", 2)
+              if len(parts) < 3:
+                  continue
+              fm, body = parts[1], parts[2]
+
+              status_m = re.search(r"public_status:\s*[\"']?(ready|published)[\"']?", fm, re.I)
+              if not status_m:
+                  continue
+
+              title_m = re.search(r"^title:\s*[\"']?(.+?)[\"']?\s*$", fm, re.M)
+              id_m = re.search(r"^id:\s*[\"']?(.+?)[\"']?\s*$", fm, re.M)
+              juris_m = re.search(r"^jurisdiction:\s*[\"']?(.+?)[\"']?\s*$", fm, re.M)
+
+              title = title_m.group(1).strip() if title_m else md.stem
+              node_id = id_m.group(1).strip() if id_m else ""
+              jurisdiction = juris_m.group(1).strip() if juris_m else ""
+              status = status_m.group(1).lower()
+              rel_path = str(md).replace("\\", "/")
+
+              summary = extract_section(body, "Plain Language Summary")
+              operational = extract_section(body, "Operational Meaning")
+              enforcement = extract_section(body, "Enforcement Considerations")
+
+              today = datetime.date.today().isoformat()
+              source_url = f"https://github.com/clearlineKris/VRN-RegMatrix/blob/main/{rel_path}"
+
+              if rel_path.startswith("00_Methodology/"):
+                  public_rel = f"methodology/{md.stem}.md"
+              else:
+                  state_guess = ""
+                  for token in ["minnesota", "ohio", "michigan", "colorado", "missouri", "illinois"]:
+                      if token in rel_path.lower() or token in jurisdiction.lower():
+                          state_guess = token
+                          break
+                  if state_guess:
+                      public_rel = f"states/{state_guess}/projections/{md.stem}.md"
+                  else:
+                      public_rel = f"projections/{md.stem}.md"
+
+              proj_content = f"""---
+layout: default
+title: "{title} — Public Projection"
+description: "Derived summary from VRN-RegMatrix knowledge node."
+source_of_truth: "{source_url}"
+last_synced: {today}
+node_id: "{node_id}"
+---
+
+> **Source of truth**  
+> This page is a simplified public projection.  
+> Canonical knowledge node: [{title}]({source_url})  
+> Full institutional bank: [VRN-RegMatrix](https://github.com/clearlineKris/VRN-RegMatrix)
+
+# {title}
+
+## Plain Language Summary
+
+{summary or "_Summary not yet extracted — see source node._"}
+
+## Key Operational Points
+
+{operational or "_See source node for operational detail._"}
+
+## Risk / Enforcement Snapshot
+
+{enforcement or "_See source node._"}
+
+## Where to go deeper
+
+- Full Authority, Intent, and related nodes → [open in VRN-RegMatrix]({source_url})
+- Related Context Maps, Action Maps, and Playbooks live in the institutional bank.
+
+---
+
+*Derived from VRN-RegMatrix. Not legal advice. Point-in-time ({today}).*
+"""
+
+              # Flatten path for local artifact storage
+              out_file = projections_dir / public_rel.replace("/", "__")
+              out_file.write_text(proj_content, encoding="utf-8")
+
+              candidates.append({
+                  "path": rel_path,
+                  "title": title,
+                  "id": node_id,
+                  "status": status,
+                  "jurisdiction": jurisdiction,
+                  "public_rel": public_rel,
+                  "generated_file": str(out_file),
+              })
 
           print(f"Found {len(candidates)} candidate(s)")
           for c in candidates:
-              print(f"  - {c['path']} ({c['status']}) — {c['title']}")
+              print(f"  - {c['path']} → {c['public_rel']}")
 
           with open("candidates.json", "w") as f:
               json.dump(candidates, f, indent=2)
 
-          # expose count for later steps
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"count={len(candidates)}\n")
-          EOF
+          PY
 
       - name: Report candidates
         run: |
           echo "### Projection Candidates" >> $GITHUB_STEP_SUMMARY
           if [ -f candidates.json ]; then
             cat candidates.json >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Generated files under generated_projections/" >> $GITHUB_STEP_SUMMARY
           else
             echo "No candidates found." >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Create PR in CLRegMatrix (if not dry-run and candidates exist)
+      - name: Create branch + PR in CLRegMatrix
         if: ${{ inputs.dry_run != true && steps.find.outputs.count != '0' }}
         env:
-          # Required secret: a fine-grained PAT or classic token with contents:write + pull-requests:write on clearlineKris/CLRegMatrix
           GH_TOKEN: ${{ secrets.CLREGMATRIX_TOKEN }}
           TARGET_REPO: clearlineKris/CLRegMatrix
           TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
+          set -e
           if [ -z "$GH_TOKEN" ]; then
-            echo "CLREGMATRIX_TOKEN secret is not set. Skipping PR creation."
-            echo "Add a fine-grained PAT with access to CLRegMatrix as repository secret CLREGMATRIX_TOKEN." >> $GITHUB_STEP_SUMMARY
+            echo "CLREGMATRIX_TOKEN secret is not set. Skipping PR."
+            echo "Add a fine-grained PAT with contents:write + pull-requests:write on CLRegMatrix as secret CLREGMATRIX_TOKEN." >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
 
-          # Create a short-lived branch name
           BRANCH="projection/vrn-$(date +%Y%m%d-%H%M%S)"
 
-          # For safety this starter only opens an issue/PR body with the candidate list.
-          # Full content generation can be added later once projection templates are stable.
+          git clone --depth 1 --branch "$TARGET_BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" target_repo
+          cd target_repo
+
+          git config user.name "VRN Projection Bot"
+          git config user.email "projection-bot@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          python3 << 'COPY'
+          import json, shutil
+          from pathlib import Path
+          cands = json.loads(Path("../candidates.json").read_text())
+          for c in cands:
+              src = Path("../") / c["generated_file"]
+              dest = Path(c["public_rel"])
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy(src, dest)
+              print(f"Copied {src} → {dest}")
+          COPY
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No file changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: project ready VRN nodes ($(date +%Y-%m-%d))"
+          git push -u origin "$BRANCH"
+
           BODY=$(cat <<EOF
-          ## Automated projection request from VRN-RegMatrix
+          ## Automated projection from VRN-RegMatrix
 
-          The following nodes are marked \`public_status: ready\` (or published) and are candidates for a thin public projection in CLRegMatrix.
+          This PR contains thin public projections for nodes marked \`public_status: ready\` (or published).
 
-          Please review and create/update the corresponding public pages using the template in VRN-RegMatrix/resources/public_projection_template.md.
+          ### What changed
+          - New or updated projection Markdown files generated from VRN knowledge nodes
+          - Each page includes a mandatory **Source of truth** block pointing back to the canonical node
 
           ### Candidates
 
           \`\`\`json
-          $(cat candidates.json)
+          $(cat ../candidates.json)
           \`\`\`
 
-          ### Required on every public page
-          - Visible **Source of truth** block linking back to the VRN node(s)
-          - Keep content thin (Plain Language Summary + key operational points)
-          - Do not duplicate full Authority / Intent / Enforcement sections
+          ### Review checklist
+          - [ ] Language is public-appropriate and free of internal-only notes
+          - [ ] Source-of-truth links resolve
+          - [ ] Paths and filenames make sense for the public site structure
+          - [ ] No full duplication of Authority / Intent / deep Enforcement sections
 
-          See VRI-STR-010 for the full cross-repo rules.
+          See [VRI-STR-010](https://github.com/clearlineKris/VRN-RegMatrix/blob/main/00_Methodology/VRI-STR-010_Cross_Repo_Linking_and_Sync.md) for the governing rules.
           EOF
           )
 
-          # Create an issue as the safest first automation (easy to turn into a PR later)
-          gh issue create \
+          gh pr create \
             --repo "$TARGET_REPO" \
-            --title "Projection candidates from VRN-RegMatrix ($(date +%Y-%m-%d))" \
-            --body "$BODY" \
-            || echo "Could not create issue — check token permissions"
+            --base "$TARGET_BRANCH" \
+            --head "$BRANCH" \
+            --title "Projection: ready nodes from VRN-RegMatrix ($(date +%Y-%m-%d))" \
+            --body "$BODY"
 
-          echo "Issue created in $TARGET_REPO (or error logged above)." >> $GITHUB_STEP_SUMMARY
+          echo "PR opened in $TARGET_REPO on branch $BRANCH" >> $GITHUB_STEP_SUMMARY
 
       - name: Dry-run notice
         if: ${{ inputs.dry_run == true }}
         run: |
-          echo "Dry run complete. Set dry_run=false and ensure CLREGMATRIX_TOKEN is configured to create issues/PRs." >> $GITHUB_STEP_SUMMARY
+          echo "Dry run complete. Generated projection files available as artifact." >> $GITHUB_STEP_SUMMARY
+          echo "Set dry_run=false and ensure CLREGMATRIX_TOKEN is present to open a real PR." >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload generated projections (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-projections
+          path: generated_projections/
+          if-no-files-found: ignore

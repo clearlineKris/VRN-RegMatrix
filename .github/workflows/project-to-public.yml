@@ -1,0 +1,145 @@
+name: Project Ready Nodes to CLRegMatrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (list candidates only, do not open PR)"
+        required: false
+        default: "true"
+        type: boolean
+      target_branch:
+        description: "Branch to open PR against in CLRegMatrix"
+        required: false
+        default: "main"
+  # Optional: uncomment to run on pushes that touch knowledge content
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - '01_Reg_Bibles/**'
+  #     - '04_Penumbrant_Papers/**'
+  #     - '05_Context_Maps/**'
+  #     - '00_Methodology/**'
+
+permissions:
+  contents: read
+  pull-requests: write   # only needed if acting on this repo; cross-repo uses token
+
+jobs:
+  project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout VRN-RegMatrix
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Find public_status: ready nodes
+        id: find
+        run: |
+          python3 << 'EOF'
+          import os, re, json
+          from pathlib import Path
+
+          candidates = []
+          root = Path(".")
+          for md in root.rglob("*.md"):
+              if md.parts[0] in {".github", "resources"} and md.name != "node_template.md":
+                  continue
+              text = md.read_text(encoding="utf-8", errors="ignore")
+              # simple front-matter parse
+              if text.startswith("---"):
+                  parts = text.split("---", 2)
+                  if len(parts) >= 3:
+                      fm = parts[1]
+                      status_match = re.search(r"public_status:\s*[\"']?(ready|published)[\"']?", fm, re.I)
+                      if status_match:
+                          title_match = re.search(r"title:\s*[\"']?(.+?)[\"']?\s*$", fm, re.M)
+                          id_match = re.search(r"^id:\s*[\"']?(.+?)[\"']?\s*$", fm, re.M)
+                          candidates.append({
+                              "path": str(md).replace("\\", "/"),
+                              "title": title_match.group(1).strip() if title_match else md.stem,
+                              "id": id_match.group(1).strip() if id_match else "",
+                              "status": status_match.group(1).lower()
+                          })
+
+          print(f"Found {len(candidates)} candidate(s)")
+          for c in candidates:
+              print(f"  - {c['path']} ({c['status']}) — {c['title']}")
+
+          with open("candidates.json", "w") as f:
+              json.dump(candidates, f, indent=2)
+
+          # expose count for later steps
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"count={len(candidates)}\n")
+          EOF
+
+      - name: Report candidates
+        run: |
+          echo "### Projection Candidates" >> $GITHUB_STEP_SUMMARY
+          if [ -f candidates.json ]; then
+            cat candidates.json >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No candidates found." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Create PR in CLRegMatrix (if not dry-run and candidates exist)
+        if: ${{ inputs.dry_run != true && steps.find.outputs.count != '0' }}
+        env:
+          # Required secret: a fine-grained PAT or classic token with contents:write + pull-requests:write on clearlineKris/CLRegMatrix
+          GH_TOKEN: ${{ secrets.CLREGMATRIX_TOKEN }}
+          TARGET_REPO: clearlineKris/CLRegMatrix
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "CLREGMATRIX_TOKEN secret is not set. Skipping PR creation."
+            echo "Add a fine-grained PAT with access to CLRegMatrix as repository secret CLREGMATRIX_TOKEN." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Create a short-lived branch name
+          BRANCH="projection/vrn-$(date +%Y%m%d-%H%M%S)"
+
+          # For safety this starter only opens an issue/PR body with the candidate list.
+          # Full content generation can be added later once projection templates are stable.
+          BODY=$(cat <<EOF
+          ## Automated projection request from VRN-RegMatrix
+
+          The following nodes are marked \`public_status: ready\` (or published) and are candidates for a thin public projection in CLRegMatrix.
+
+          Please review and create/update the corresponding public pages using the template in VRN-RegMatrix/resources/public_projection_template.md.
+
+          ### Candidates
+
+          \`\`\`json
+          $(cat candidates.json)
+          \`\`\`
+
+          ### Required on every public page
+          - Visible **Source of truth** block linking back to the VRN node(s)
+          - Keep content thin (Plain Language Summary + key operational points)
+          - Do not duplicate full Authority / Intent / Enforcement sections
+
+          See VRI-STR-010 for the full cross-repo rules.
+          EOF
+          )
+
+          # Create an issue as the safest first automation (easy to turn into a PR later)
+          gh issue create \
+            --repo "$TARGET_REPO" \
+            --title "Projection candidates from VRN-RegMatrix ($(date +%Y-%m-%d))" \
+            --body "$BODY" \
+            || echo "Could not create issue — check token permissions"
+
+          echo "Issue created in $TARGET_REPO (or error logged above)." >> $GITHUB_STEP_SUMMARY
+
+      - name: Dry-run notice
+        if: ${{ inputs.dry_run == true }}
+        run: |
+          echo "Dry run complete. Set dry_run=false and ensure CLREGMATRIX_TOKEN is configured to create issues/PRs." >> $GITHUB_STEP_SUMMARY
